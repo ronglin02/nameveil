@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" role="img" aria-labelledby="title desc">
+  <title id="title">NameVeil app icon</title>
+  <desc id="desc">A folded document partially concealed by a flowing veil.</desc>
+  <defs>
+    <linearGradient id="background" x1="128" y1="96" x2="896" y2="928" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#315BE8"/>
+      <stop offset="0.55" stop-color="#5547E7"/>
+      <stop offset="1" stop-color="#7B36D8"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0" cy="0" r="1" gradientTransform="translate(760 228) rotate(132) scale(540)" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#60E8FF" stop-opacity="0.34"/>
+      <stop offset="1" stop-color="#60E8FF" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="shadow" x="180" y="140" width="670" height="760" filterUnits="userSpaceOnUse">
+      <feDropShadow dx="0" dy="32" stdDeviation="30" flood-color="#171454" flood-opacity="0.34"/>
+    </filter>
+  </defs>
+
+  <rect x="32" y="32" width="960" height="960" rx="224" fill="url(#background)"/>
+  <rect x="32" y="32" width="960" height="960" rx="224" fill="url(#glow)"/>
+
+  <g filter="url(#shadow)">
+    <path d="M315 210H568L735 377V790C735 824 708 851 674 851H315C281 851 254 824 254 790V271C254 237 281 210 315 210Z" fill="#FFFFFF"/>
+    <path d="M568 210L735 377H626C594 377 568 351 568 319V210Z" fill="#CCD8FF"/>
+    <path d="M568 210V319C568 351 594 377 626 377H735" fill="none" stroke="#A9BBF8" stroke-width="18" stroke-linejoin="round"/>
+  </g>
+
+  <!-- The dark sweep hides the filename; the cyan edge suggests a reversible reveal. -->
+  <path d="M194 565C326 459 459 476 572 536C666 586 748 601 836 531" fill="none" stroke="#242264" stroke-width="138" stroke-linecap="round"/>
+  <path d="M194 542C326 436 459 453 572 513C666 563 748 578 836 508" fill="none" stroke="#66E6FF" stroke-width="28" stroke-linecap="round"/>
+
+  <!-- A compact V in negative space keeps the mark recognizable at launcher size. -->
+  <path d="M399 473L497 652L601 473" fill="none" stroke="#FFFFFF" stroke-width="47" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

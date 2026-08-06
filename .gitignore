@@ -1,0 +1,15 @@
+.gradle/
+.idea/
+.kotlin/
+.tooling/
+**/build/
+local.properties
+*.iml
+*.log
+*.jks
+*.keystore
+.env
+.DS_Store
+Thumbs.db
+
+nameveil-release.jks

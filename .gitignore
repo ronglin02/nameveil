@@ -3,6 +3,7 @@
 .kotlin/
 .tooling/
 **/build/
+/output/
 local.properties
 *.iml
 *.log

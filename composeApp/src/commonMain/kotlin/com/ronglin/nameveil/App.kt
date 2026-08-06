@@ -21,6 +21,8 @@ import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -36,6 +38,8 @@ import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Visibility
 import androidx.compose.material.icons.outlined.VisibilityOff
 import androidx.compose.material.icons.rounded.DriveFileRenameOutline
+import androidx.compose.material.icons.rounded.ChevronRight
+import androidx.compose.material.icons.rounded.ExpandMore
 import androidx.compose.material.icons.rounded.Folder
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -126,7 +130,7 @@ fun NameVeilApp(platform: PlatformGateway) {
                     val wide = maxWidth >= 900.dp
                     Column(Modifier.fillMaxSize()) {
                         AppHeader()
-                        Spacer(Modifier.height(18.dp))
+                        Spacer(Modifier.height(if (wide) 12.dp else 18.dp))
 
                         if (wide) {
                             Row(
@@ -136,11 +140,23 @@ fun NameVeilApp(platform: PlatformGateway) {
                                 Column(
                                     Modifier
                                         .width(380.dp)
-                                        .fillMaxHeight()
-                                        .verticalScroll(rememberScrollState()),
+                                        .fillMaxHeight(),
                                 ) {
-                                    ControlPanel(controller, scope, onExecute = { showConfirmation = true })
-                                    Spacer(Modifier.height(12.dp))
+                                    Column(
+                                        Modifier
+                                            .weight(1f)
+                                            .fillMaxWidth()
+                                            .verticalScroll(rememberScrollState()),
+                                    ) {
+                                        ControlPanel(controller, scope, compact = true)
+                                        Spacer(Modifier.height(8.dp))
+                                    }
+                                    ControlActions(
+                                        controller = controller,
+                                        scope = scope,
+                                        onExecute = { showConfirmation = true },
+                                        compact = true,
+                                    )
                                 }
                                 PreviewPanel(
                                     controller = controller,
@@ -153,7 +169,13 @@ fun NameVeilApp(platform: PlatformGateway) {
                                 Modifier.fillMaxSize().verticalScroll(rememberScrollState()),
                                 verticalArrangement = Arrangement.spacedBy(14.dp),
                             ) {
-                                ControlPanel(controller, scope, onExecute = { showConfirmation = true })
+                                ControlPanel(controller, scope, compact = false)
+                                ControlActions(
+                                    controller = controller,
+                                    scope = scope,
+                                    onExecute = { showConfirmation = true },
+                                    compact = false,
+                                )
                                 PreviewPanel(
                                     controller = controller,
                                     modifier = Modifier.fillMaxWidth(),
@@ -253,18 +275,21 @@ private fun AppHeader() {
 private fun ControlPanel(
     controller: AppController,
     scope: kotlinx.coroutines.CoroutineScope,
-    onExecute: () -> Unit,
+    compact: Boolean,
 ) {
-    Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
-        PanelCard {
+    val sectionGap = if (compact) 8.dp else 12.dp
+    val cardGap = if (compact) 10.dp else 14.dp
+
+    Column(verticalArrangement = Arrangement.spacedBy(cardGap)) {
+        PanelCard(compact) {
             SectionTitle("处理方式", "选择隐匿名称或根据 NAMEVEIL 配置恢复")
-            Spacer(Modifier.height(12.dp))
-            ModeSelector(controller.mode, controller::updateMode)
+            Spacer(Modifier.height(sectionGap))
+            ModeSelector(controller.mode, controller::updateMode, compact)
         }
 
-        PanelCard {
+        PanelCard(compact) {
             SectionTitle("工作目录", "应用只会访问你明确选择的目录")
-            Spacer(Modifier.height(12.dp))
+            Spacer(Modifier.height(sectionGap))
             OutlinedButton(
                 onClick = { controller.chooseDirectory(scope) },
                 enabled = !controller.isBusy,
@@ -275,20 +300,25 @@ private fun ControlPanel(
                 Text(if (controller.location == null) "选择目录" else "更换目录")
             }
             controller.location?.let { location ->
-                Spacer(Modifier.height(10.dp))
+                Spacer(Modifier.height(if (compact) 7.dp else 10.dp))
                 Row(
                     Modifier
                         .fillMaxWidth()
                         .clip(RoundedCornerShape(12.dp))
                         .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f))
-                        .padding(11.dp),
+                        .padding(if (compact) 8.dp else 11.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Icon(Icons.Rounded.Folder, null, tint = MaterialTheme.colorScheme.primary)
-                    Spacer(Modifier.width(9.dp))
+                    Icon(
+                        Icons.Rounded.Folder,
+                        null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = if (compact) Modifier.size(20.dp) else Modifier,
+                    )
+                    Spacer(Modifier.width(if (compact) 7.dp else 9.dp))
                     Text(
                         location.displayPath,
-                        maxLines = 2,
+                        maxLines = if (compact) 1 else 2,
                         overflow = TextOverflow.Ellipsis,
                         style = MaterialTheme.typography.bodySmall,
                     )
@@ -296,25 +326,30 @@ private fun ControlPanel(
             }
         }
 
-        PanelCard {
+        PanelCard(compact) {
             SectionTitle("操作选项", "预览后仍需再次确认才会修改文件")
-            Spacer(Modifier.height(8.dp))
+            Spacer(Modifier.height(if (compact) 5.dp else 8.dp))
             OptionRow(
                 title = "包含子目录",
                 description = "递归处理所选目录下的所有层级",
                 checked = controller.includeSubdirectories,
                 onCheckedChange = controller::updateIncludeSubdirectories,
+                compact = compact,
             )
             if (controller.mode == OperationMode.Transform) {
-                HorizontalDivider(Modifier.padding(vertical = 4.dp), color = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f))
+                HorizontalDivider(
+                    Modifier.padding(vertical = if (compact) 2.dp else 4.dp),
+                    color = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f),
+                )
                 OptionRow(
                     title = "保留扩展名（不推荐）",
                     description = "关闭后才能规避仅根据 .jpg、.pdf 等后缀工作的扫描器",
                     checked = controller.preserveExtension,
                     onCheckedChange = controller::updatePreserveExtension,
+                    compact = compact,
                 )
             }
-            Spacer(Modifier.height(9.dp))
+            Spacer(Modifier.height(if (compact) 6.dp else 9.dp))
             OutlinedTextField(
                 value = controller.password,
                 onValueChange = controller::updatePassword,
@@ -333,13 +368,23 @@ private fun ControlPanel(
                 },
             )
             Text(
-                if (controller.mode == OperationMode.Transform) "映射使用 AES-256-GCM 包装；密码会以君子模式保存在当前目录，忘记后可找回。" else "只识别固定的 NAMEVEIL 配置格式。忘记密码可直接从配置找回。",
-                Modifier.padding(top = 7.dp),
+                if (compact) {
+                    if (controller.mode == OperationMode.Transform) {
+                        "密码保存在 NAMEVEIL 配置中，忘记后可找回。"
+                    } else {
+                        "只识别 NAMEVEIL 配置；忘记密码可直接找回。"
+                    }
+                } else if (controller.mode == OperationMode.Transform) {
+                    "映射使用 AES-256-GCM 包装；密码会以君子模式保存在当前目录，忘记后可找回。"
+                } else {
+                    "只识别固定的 NAMEVEIL 配置格式。忘记密码可直接从配置找回。"
+                },
+                Modifier.padding(top = if (compact) 5.dp else 7.dp),
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 style = MaterialTheme.typography.bodySmall,
             )
             if (controller.mode == OperationMode.Restore) {
-                Spacer(Modifier.height(10.dp))
+                Spacer(Modifier.height(if (compact) 7.dp else 10.dp))
                 OutlinedButton(
                     onClick = { controller.recoverPassword(scope) },
                     enabled = !controller.isBusy && controller.location != null,
@@ -375,9 +420,9 @@ private fun ControlPanel(
         controller.report?.let { ReportCard(it) }
 
         controller.progress?.let { progress ->
-            PanelCard {
+            PanelCard(compact) {
                 Text("正在处理 ${progress.completedDirectories}/${progress.totalDirectories}", fontWeight = FontWeight.SemiBold)
-                Spacer(Modifier.height(8.dp))
+                Spacer(Modifier.height(if (compact) 6.dp else 8.dp))
                 LinearProgressIndicator(
                     progress = { if (progress.totalDirectories == 0) 0f else progress.completedDirectories.toFloat() / progress.totalDirectories },
                     modifier = Modifier.fillMaxWidth(),
@@ -385,7 +430,7 @@ private fun ControlPanel(
                 if (progress.currentDirectory.isNotEmpty()) {
                     Text(
                         progress.currentDirectory,
-                        Modifier.padding(top = 7.dp),
+                        Modifier.padding(top = if (compact) 5.dp else 7.dp),
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                         style = MaterialTheme.typography.bodySmall,
@@ -394,10 +439,24 @@ private fun ControlPanel(
             }
         }
 
+    }
+}
+
+@Composable
+private fun ControlActions(
+    controller: AppController,
+    scope: kotlinx.coroutines.CoroutineScope,
+    onExecute: () -> Unit,
+    compact: Boolean,
+) {
+    val buttonHeight = if (compact) 44.dp else 48.dp
+    val plan = controller.plan
+
+    if (plan == null) {
         Button(
             onClick = { controller.createPreview(scope) },
             enabled = !controller.isBusy,
-            modifier = Modifier.fillMaxWidth().height(48.dp),
+            modifier = Modifier.fillMaxWidth().height(buttonHeight),
         ) {
             if (controller.isBusy && controller.progress == null) {
                 CircularProgressIndicator(Modifier.size(19.dp), strokeWidth = 2.dp, color = MaterialTheme.colorScheme.onPrimary)
@@ -407,19 +466,31 @@ private fun ControlPanel(
             Spacer(Modifier.width(8.dp))
             Text("生成改名预览")
         }
-
-        if (controller.plan != null) {
+    } else {
+        Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            OutlinedButton(
+                onClick = { controller.createPreview(scope) },
+                enabled = !controller.isBusy,
+                modifier = Modifier.weight(1f).height(buttonHeight),
+            ) {
+                Icon(Icons.Outlined.Refresh, null, Modifier.size(19.dp))
+                Spacer(Modifier.width(6.dp))
+                Text("重新预览")
+            }
             FilledTonalButton(
                 onClick = onExecute,
                 enabled = !controller.isBusy,
-                modifier = Modifier.fillMaxWidth().height(48.dp),
+                modifier = Modifier.weight(1f).height(buttonHeight),
                 colors = ButtonDefaults.filledTonalButtonColors(
                     containerColor = MaterialTheme.colorScheme.primaryContainer,
                 ),
             ) {
-                Icon(Icons.Rounded.DriveFileRenameOutline, null)
-                Spacer(Modifier.width(8.dp))
-                Text(if (controller.mode == OperationMode.Transform) "执行文件名隐匿" else "执行文件名恢复")
+                Icon(Icons.Rounded.DriveFileRenameOutline, null, Modifier.size(19.dp))
+                Spacer(Modifier.width(6.dp))
+                Text(if (plan.mode == OperationMode.Transform) "执行隐匿" else "执行恢复")
             }
         }
     }
@@ -465,33 +536,47 @@ private fun PreviewPanel(
             if (plan == null) {
                 EmptyPreview(controller.report != null)
             } else {
-                PreviewHeader(plan)
+                var expandedDirectories by remember(plan) { mutableStateOf(emptySet<String>()) }
+                PreviewHeader(
+                    plan = plan,
+                    canCollapse = expandedDirectories.isNotEmpty(),
+                    onCollapseAll = { expandedDirectories = emptySet() },
+                )
                 Spacer(Modifier.height(10.dp))
-                val scrollModifier = if (fillAvailableHeight) {
-                    Modifier.weight(1f).verticalScroll(rememberScrollState())
+                val listModifier = if (fillAvailableHeight) {
+                    Modifier.weight(1f)
                 } else {
-                    Modifier
+                    Modifier.height(420.dp)
                 }
-                Column(scrollModifier.fillMaxWidth()) {
-                    val visibleMappings = if (fillAvailableHeight) plan.mappings else plan.mappings.take(40)
-                    visibleMappings.forEachIndexed { index, mapping ->
-                        MappingRow(
-                            index = index + 1,
-                            directory = mapping.directoryPath,
-                            from = mapping.fromName,
-                            to = mapping.toName,
-                        )
-                        if (index != visibleMappings.lastIndex) {
-                            HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.22f))
+                LazyColumn(listModifier.fillMaxWidth()) {
+                    plan.directories.forEach { directory ->
+                        val expanded = directory.directoryId in expandedDirectories
+                        item(key = "directory:${directory.directoryId}") {
+                            DirectoryRow(
+                                path = directory.relativePath,
+                                fileCount = directory.mappings.size,
+                                expanded = expanded,
+                                onClick = {
+                                    expandedDirectories = if (expanded) {
+                                        expandedDirectories - directory.directoryId
+                                    } else {
+                                        expandedDirectories + directory.directoryId
+                                    }
+                                },
+                            )
                         }
-                    }
-                    if (!fillAvailableHeight && plan.mappings.size > visibleMappings.size) {
-                        Text(
-                            "移动端仅显示前 ${visibleMappings.size} 条；全部 ${plan.mappings.size} 条都会按此配置处理。",
-                            Modifier.padding(top = 14.dp),
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            style = MaterialTheme.typography.bodySmall,
-                        )
+                        if (expanded) {
+                            itemsIndexed(
+                                items = directory.mappings,
+                                key = { _, mapping -> "mapping:${directory.directoryId}:${mapping.itemId}" },
+                            ) { index, mapping ->
+                                MappingRow(
+                                    index = index + 1,
+                                    from = mapping.fromName,
+                                    to = mapping.toName,
+                                )
+                            }
+                        }
                     }
                 }
             }
@@ -500,7 +585,11 @@ private fun PreviewPanel(
 }
 
 @Composable
-private fun PreviewHeader(plan: RenamePlan) {
+private fun PreviewHeader(
+    plan: RenamePlan,
+    canCollapse: Boolean,
+    onCollapseAll: () -> Unit,
+) {
     Row(
         Modifier
             .fillMaxWidth()
@@ -512,17 +601,79 @@ private fun PreviewHeader(plan: RenamePlan) {
         Icon(Icons.Outlined.CheckCircle, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(20.dp))
         Spacer(Modifier.width(8.dp))
         Text(
-            "已检查 ${plan.directories.size} 个目录，没有发现名称冲突",
+            "${plan.directories.size} 个目录 · ${plan.mappings.size} 个文件，没有名称冲突",
+            modifier = Modifier.weight(1f),
             color = MaterialTheme.colorScheme.onPrimaryContainer,
             style = MaterialTheme.typography.bodySmall,
             fontWeight = FontWeight.Medium,
         )
+        TextButton(
+            onClick = onCollapseAll,
+            enabled = canCollapse,
+        ) {
+            Text("全部收起")
+        }
     }
 }
 
 @Composable
-private fun MappingRow(index: Int, directory: String, from: String, to: String) {
-    Row(Modifier.fillMaxWidth().padding(vertical = 11.dp), verticalAlignment = Alignment.CenterVertically) {
+private fun DirectoryRow(
+    path: String,
+    fileCount: Int,
+    expanded: Boolean,
+    onClick: () -> Unit,
+) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 8.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(
+            if (expanded) Icons.Rounded.ExpandMore else Icons.Rounded.ChevronRight,
+            contentDescription = if (expanded) "收起目录" else "展开目录",
+            modifier = Modifier.size(22.dp),
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Spacer(Modifier.width(6.dp))
+        Icon(
+            Icons.Rounded.Folder,
+            contentDescription = null,
+            modifier = Modifier.size(23.dp),
+            tint = MaterialTheme.colorScheme.primary,
+        )
+        Spacer(Modifier.width(10.dp))
+        Text(
+            path,
+            modifier = Modifier.weight(1f),
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            style = MaterialTheme.typography.bodyMedium,
+            fontWeight = FontWeight.SemiBold,
+        )
+        Surface(
+            shape = RoundedCornerShape(50),
+            color = MaterialTheme.colorScheme.surfaceVariant,
+        ) {
+            Text(
+                "$fileCount 个文件",
+                modifier = Modifier.padding(horizontal = 9.dp, vertical = 4.dp),
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.labelSmall,
+            )
+        }
+    }
+    HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.22f))
+}
+
+@Composable
+private fun MappingRow(index: Int, from: String, to: String) {
+    Row(
+        Modifier.fillMaxWidth().padding(start = 42.dp, top = 9.dp, bottom = 9.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
         Box(
             Modifier.size(29.dp).clip(CircleShape).background(MaterialTheme.colorScheme.surfaceVariant),
             contentAlignment = Alignment.Center,
@@ -531,11 +682,14 @@ private fun MappingRow(index: Int, directory: String, from: String, to: String) 
         }
         Spacer(Modifier.width(11.dp))
         Column(Modifier.weight(1f)) {
-            Text(directory, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
             Text(from, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodyMedium)
             Text("→  $to", maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
         }
     }
+    HorizontalDivider(
+        modifier = Modifier.padding(start = 42.dp),
+        color = MaterialTheme.colorScheme.outline.copy(alpha = 0.16f),
+    )
 }
 
 @Composable
@@ -571,13 +725,19 @@ private fun EmptyPreview(operationFinished: Boolean) {
 }
 
 @Composable
-private fun PanelCard(content: @Composable ColumnScope.() -> Unit) {
+private fun PanelCard(
+    compact: Boolean = false,
+    content: @Composable ColumnScope.() -> Unit,
+) {
     Card(
-        shape = RoundedCornerShape(18.dp),
+        shape = RoundedCornerShape(if (compact) 16.dp else 18.dp),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.94f)),
         elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
     ) {
-        Column(Modifier.fillMaxWidth().padding(16.dp), content = content)
+        Column(
+            Modifier.fillMaxWidth().padding(if (compact) 13.dp else 16.dp),
+            content = content,
+        )
     }
 }
 
@@ -588,12 +748,20 @@ private fun SectionTitle(title: String, subtitle: String) {
 }
 
 @Composable
-private fun ModeSelector(selected: OperationMode, onSelected: (OperationMode) -> Unit) {
+private fun ModeSelector(
+    selected: OperationMode,
+    onSelected: (OperationMode) -> Unit,
+    compact: Boolean,
+) {
     Row(
-        Modifier.fillMaxWidth().clip(RoundedCornerShape(13.dp)).background(MaterialTheme.colorScheme.surfaceVariant).padding(4.dp),
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(13.dp))
+            .background(MaterialTheme.colorScheme.surfaceVariant)
+            .padding(if (compact) 3.dp else 4.dp),
     ) {
-        ModeButton("隐匿文件名", OperationMode.Transform, selected, onSelected, Modifier.weight(1f))
-        ModeButton("恢复文件名", OperationMode.Restore, selected, onSelected, Modifier.weight(1f))
+        ModeButton("隐匿文件名", OperationMode.Transform, selected, onSelected, Modifier.weight(1f), compact)
+        ModeButton("恢复文件名", OperationMode.Restore, selected, onSelected, Modifier.weight(1f), compact)
     }
 }
 
@@ -604,6 +772,7 @@ private fun ModeButton(
     selected: OperationMode,
     onSelected: (OperationMode) -> Unit,
     modifier: Modifier,
+    compact: Boolean,
 ) {
     val active = mode == selected
     Surface(
@@ -614,7 +783,7 @@ private fun ModeButton(
     ) {
         Text(
             text,
-            Modifier.padding(vertical = 10.dp),
+            Modifier.padding(vertical = if (compact) 8.dp else 10.dp),
             color = if (active) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
             fontWeight = if (active) FontWeight.Bold else FontWeight.Medium,
             style = MaterialTheme.typography.labelLarge,
@@ -624,11 +793,23 @@ private fun ModeButton(
 }
 
 @Composable
-private fun OptionRow(title: String, description: String, checked: Boolean, onCheckedChange: (Boolean) -> Unit) {
+private fun OptionRow(
+    title: String,
+    description: String,
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit,
+    compact: Boolean,
+) {
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
         Column(Modifier.weight(1f)) {
             Text(title, fontWeight = FontWeight.Medium, style = MaterialTheme.typography.bodyMedium)
-            Text(description, color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
+            Text(
+                description,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.bodySmall,
+                maxLines = if (compact) 1 else Int.MAX_VALUE,
+                overflow = TextOverflow.Ellipsis,
+            )
         }
         Spacer(Modifier.width(8.dp))
         Switch(checked, onCheckedChange)

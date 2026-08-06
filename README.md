@@ -24,7 +24,7 @@ NameVeil 用于规避仅根据原文件名或 `.jpg`、`.pdf` 等扩展名工作
 
 ## 单一配置格式
 
-项目只支持一种固定格式，不包含 GBK、旧 Java 清单或历史 JSON 兼容代码：
+项目只支持一种固定格式：
 
 | 文件 | 用途 |
 | --- | --- |
@@ -154,103 +154,3 @@ Linux：
 ./gradlew :composeApp:run --args="--help"
 ./gradlew :composeApp:packageDeb
 ```
-
-原生安装包必须在目标操作系统构建。
-
-## 绑定 GitHub 仓库
-
-仓库建议直接命名为 `NameVeil`。当前应用 ID 是 `com.ronglin.nameveil`；如果将来准备发布到应用商店，请在第一次正式发布前确定最终 ID，发布后不要再修改。
-
-```bash
-git init
-git add .
-git commit -m "Initial NameVeil release"
-git branch -M main
-git remote add origin git@github.com:<你的用户名>/NameVeil.git
-git push -u origin main
-```
-
-也可以把 SSH 地址替换为 GitHub 提供的 HTTPS 地址。
-
-## GitHub Releases
-
-[`.github/workflows/release.yml`](.github/workflows/release.yml) 会在推送 `v*.*.*` 标签时并行生成：
-
-- `NameVeil-<版本>-android.apk`
-- `NameVeil-<版本>-windows-x64.msi`
-- `NameVeil-<版本>-windows-x64-portable.zip`
-- `NameVeil-<版本>-linux-x64.deb`
-
-随后自动创建 GitHub Release、生成 Release Notes 并上传四个文件。便携 ZIP 解压后直接运行
-`NameVeil/NameVeil.exe`，无需安装，但不能只单独复制 EXE，旁边的 `app/` 和 `runtime/` 也必须保留。
-发布流程会先运行全部桌面端测试，并检查标签版本与 `composeApp/build.gradle.kts` 中的
-`packageVersion` 一致，避免把内部版本错误的安装包发布出去。
-
-### Android 签名配置
-
-首次发布前在本地生成并妥善备份 keystore：
-
-```bash
-keytool -genkeypair -v \
-  -keystore nameveil-release.jks \
-  -alias nameveil \
-  -keyalg RSA -keysize 2048 -validity 10000
-```
-
-把 keystore 转为 Base64，然后配置四个 GitHub Actions Secrets：
-
-| Secret | 内容 |
-| --- | --- |
-| `ANDROID_KEYSTORE_BASE64` | keystore 的 Base64 内容 |
-| `ANDROID_KEYSTORE_PASSWORD` | keystore 密码 |
-| `ANDROID_KEY_ALIAS` | 例如 `nameveil` |
-| `ANDROID_KEY_PASSWORD` | key 密码 |
-
-PowerShell 生成 Base64：
-
-```powershell
-[Convert]::ToBase64String([IO.File]::ReadAllBytes("nameveil-release.jks")) |
-  Set-Clipboard
-```
-
-Linux：
-
-```bash
-base64 -w 0 nameveil-release.jks
-```
-
-`*.jks` 与 `*.keystore` 已加入 `.gitignore`。不要提交或遗失 keystore，否则后续 Android 版本无法覆盖安装。
-
-### 发布版本
-
-```bash
-git tag v1.0.0
-git push origin v1.0.0
-```
-
-也可以在 GitHub Actions 页面手动运行 Release workflow 并填写标签。
-
-## 项目结构
-
-```text
-brand/                 # 原创 SVG 与仓库展示图标
-.github/workflows/     # Android / Windows / Linux 自动发布
-composeApp/src/
-├── commonMain/        # Compose UI、固定配置协议、事务改名引擎
-├── commonTest/        # 往返、密码找回与回滚测试
-├── androidMain/       # Android SAF 与 Android 加密实现
-├── desktopMain/       # Windows/Linux GUI、CLI 与 JVM 文件系统
-└── desktopTest/       # AES、PBKDF2 与 headless CLI 端到端测试
-```
-
-当前品牌图标由 `gpt-image-2` 生成并经过小尺寸、透明边缘与平台裁切验证：
-
-- [`brand/nameveil-icon-generated.png`](brand/nameveil-icon-generated.png)：仓库与桌面端主图标。
-- [`brand/nameveil-icon-foreground.png`](brand/nameveil-icon-foreground.png)：Android 自适应图标透明前景。
-- [`brand/nameveil-icon.svg`](brand/nameveil-icon.svg)：最初的原创矢量回退版本，便于以后完全手工调整。
-
-Android、Windows 与 Linux 构建都使用同一“文件 + 遮罩 + 青色 V 形揭示区”视觉标志。
-
-nameveil-release.jks 密钥是6位数字密码(QQ)
-正在为以下对象生成 2,048 位RSA密钥对和自签名证书 (SHA256withRSA) (有效期为 10,000 天):
-         CN=XXXXXXX XXXXX, OU=Unknown, O=Unknown, L=Unknown, ST=Unknown, C=Unknown

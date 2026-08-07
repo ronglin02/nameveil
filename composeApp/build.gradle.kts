@@ -78,8 +78,8 @@ android {
         applicationId = "com.ronglin.nameveil"
         minSdk = 26
         targetSdk = 35
-        versionCode = 10000
-        versionName = "1.0.0"
+        versionCode = 10002
+        versionName = "1.0.2"
     }
 
     compileOptions {
@@ -107,7 +107,7 @@ compose.desktop {
         nativeDistributions {
             targetFormats(TargetFormat.Msi, TargetFormat.Deb)
             packageName = "NameVeil"
-            packageVersion = "1.0.0"
+            packageVersion = "1.0.2"
             // Keep native-package metadata ASCII-only: Windows jpackage reads its
             // generated argument file with the active system code page.
             description = "Offline cross-platform filename privacy tool"

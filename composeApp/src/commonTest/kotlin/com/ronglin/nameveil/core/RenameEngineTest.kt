@@ -5,16 +5,139 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.runTest
 
 class RenameEngineTest {
+    @Test
+    fun recursiveRestorePreviewListsEachDirectoryOnceAndKeepsTreeOrder() = runTest {
+        val storage = MemoryStorage()
+        val crypto = FakeCrypto()
+        val config = NameVeilConfigCodec.encrypt(
+            NameVeilConfigPayload(0, listOf(StoredNameMapping("hidden", "photo.jpg"))), "pw", crypto,
+        )
+        val tree = mapOf("root" to listOf("b", "a"), "a" to listOf("deep"))
+        val visits = mutableListOf<String>()
+        val gateway = object : StorageGateway by storage {
+            override suspend fun listChildren(directoryId: String): List<StorageItem> {
+                visits += directoryId
+                return tree[directoryId].orEmpty().map { StorageItem(it, it, true) } + listOf(
+                    StorageItem("$directoryId/hidden", "hidden", false),
+                    StorageItem("$directoryId/$CONFIG_FILE_NAME", CONFIG_FILE_NAME, false),
+                )
+            }
+
+            override suspend fun readBytes(fileId: String) = config
+        }
+        val engine = RenameEngine(gateway, crypto)
+        val root = StorageLocation("root", "root", "root")
+        for (recursive in listOf(true, false)) {
+            visits.clear()
+            val plan = engine.createPlan(root, OperationMode.Restore, "pw", recursive, false)
+            val expected = if (recursive) listOf("root", "a", "deep", "b") else listOf("root")
+            assertEquals(expected, visits)
+            assertEquals(expected, plan.directories.map { it.directoryId })
+            assertTrue(plan.mappings.all { it.toName == "photo.jpg" })
+        }
+    }
+
+    @Test
+    fun singleDirectoryUsesBoundedParallelIoAndRestoresEachFileInOneMove() = runTest {
+        val storage = MemoryStorage()
+        repeat(13) { storage.addFile("photo-$it.jpg", "data-$it") }
+        var active = 0
+        var peak = 0
+        var moves = 0
+        val gateway = object : StorageGateway by storage {
+            override suspend fun rename(itemId: String, newName: String): String {
+                active++
+                peak = maxOf(peak, active)
+                moves++
+                delay(10)
+                active--
+                return storage.rename(itemId, newName)
+            }
+        }
+        val crypto = FakeCrypto()
+        suspend fun checkRun(mode: OperationMode, workers: Int) {
+            val engine = RenameEngine(gateway, crypto, workers)
+            val plan = engine.createPlan(storage.location, mode, "pw", false, false)
+            val counts = mutableListOf<Int>()
+            peak = 0
+            moves = 0
+            assertTrue(engine.execute(plan) { counts += it.completedFiles }.isSuccess)
+            assertEquals(workers, peak)
+            assertEquals(if (mode == OperationMode.Restore) 13 else 14, moves)
+            assertTrue(counts.any { it in 1..12 })
+            assertEquals(counts.sorted(), counts)
+            assertEquals(13, counts.last())
+        }
+        for (workers in listOf(1, 3, 8)) {
+            checkRun(OperationMode.Transform, workers)
+            checkRun(OperationMode.Restore, workers)
+        }
+        repeat(13) { assertEquals("data-$it", storage.readBytes("/root/photo-$it.jpg").decodeToString()) }
+    }
+
+    @Test
+    fun cancellationWaitsForInFlightRenamesAndRollsBack() = runTest {
+        val storage = MemoryStorage()
+        val original = (1..8).map { "file-$it" }.toSet()
+        original.forEach { storage.addFile(it, it) }
+        val started = CompletableDeferred<Unit>()
+        val gateway = object : StorageGateway by storage {
+            override suspend fun rename(itemId: String, newName: String): String {
+                started.complete(Unit)
+                delay(10)
+                return storage.rename(itemId, newName)
+            }
+        }
+        val engine = RenameEngine(gateway, FakeCrypto())
+        val plan = engine.createPlan(storage.location, OperationMode.Transform, "pw", false, false)
+        val job = launch { engine.execute(plan) }
+        started.await()
+        job.cancelAndJoin()
+        assertEquals(original, storage.fileNames())
+    }
+
+    @Test
+    fun failedParallelRestorePreservesSwapAndCanBeRetried() = runTest {
+        val crypto = FakeCrypto()
+        val storage = MemoryStorage().apply {
+            addFile("a", "first")
+            addFile("b", "second")
+            addFile("c", "third")
+            val payload = NameVeilConfigPayload(0, listOf(
+                StoredNameMapping("a", "b"), StoredNameMapping("b", "a"), StoredNameMapping("c", "photo.jpg"),
+            ))
+            addBytes(CONFIG_FILE_NAME, NameVeilConfigCodec.encrypt(payload, "pw", crypto))
+        }
+        val engine = RenameEngine(storage, crypto)
+        val plan = engine.createPlan(storage.location, OperationMode.Restore, "pw", false, false)
+        storage.failRenameAt = 3 // The other final rename in this batch succeeds.
+        assertFalse(engine.execute(plan).isSuccess)
+        assertEquals(setOf("a", "b", "c", CONFIG_FILE_NAME), storage.fileNames())
+        assertEquals("first", storage.readBytes("/root/a").decodeToString())
+        assertEquals("second", storage.readBytes("/root/b").decodeToString())
+        val report = engine.execute(engine.createPlan(storage.location, OperationMode.Restore, "pw", false, false))
+        assertTrue(report.isSuccess)
+        assertEquals(2, report.stagedFiles)
+        assertEquals("third", storage.readBytes("/root/photo.jpg").decodeToString())
+        assertEquals("first", storage.readBytes("/root/b").decodeToString())
+        assertEquals("second", storage.readBytes("/root/a").decodeToString())
+    }
+
     @Test
     fun transformAndRestoreRoundTrip() = runTest {
         val storage = MemoryStorage().apply {
             addFile("photo one.jpg", "image")
             addFile("notes.txt", "hello")
         }
-        val engine = RenameEngine(storage, FakeCrypto())
+        val crypto = FakeCrypto()
+        val engine = RenameEngine(storage, crypto)
 
         val transform = engine.createPlan(
             storage.location,
@@ -26,10 +149,13 @@ class RenameEngineTest {
 
         assertEquals(2, transform.mappings.size)
         assertTrue(transform.mappings.none { '.' in it.toName })
-        val encryptedConfig = transform.directories.single().configBytes!!.decodeToString()
+        assertEquals(0, crypto.encryptions)
+        assertEquals(setOf("photo one.jpg", "notes.txt"), storage.fileNames())
+        assertTrue(engine.execute(transform).isSuccess)
+        assertEquals(1, crypto.encryptions)
+        val encryptedConfig = storage.readBytes("/root/$CONFIG_FILE_NAME").decodeToString()
         assertTrue(encryptedConfig.contains("secret")) // 君子模式允许找回密码
         assertFalse(encryptedConfig.contains("photo one.jpg"))
-        assertTrue(engine.execute(transform).isSuccess)
         assertTrue(CONFIG_FILE_NAME in storage.fileNames())
         assertFalse("photo one.jpg" in storage.fileNames())
         assertEquals("secret", engine.recoverPassword(storage.location, false))
@@ -91,7 +217,7 @@ class RenameEngineTest {
             directory.directoryId,
             PENDING_CONFIG_FILE_NAME,
             "application/octet-stream",
-            requireNotNull(directory.configBytes),
+            requireNotNull(directory.buildPendingConfig).invoke(),
         )
         val completedBeforeShutdown = directory.mappings.first()
         storage.rename(completedBeforeShutdown.itemId, completedBeforeShutdown.toName)
@@ -111,6 +237,8 @@ class RenameEngineTest {
 }
 
 private class FakeCrypto : CryptoSupport {
+    var encryptions = 0
+        private set
     private var counter = 1
 
     override fun secureRandomBytes(size: Int): ByteArray =
@@ -128,6 +256,7 @@ private class FakeCrypto : CryptoSupport {
         iterations: Int,
         associatedData: ByteArray,
     ): ByteArray {
+        encryptions++
         val key = hash(password.encodeToByteArray() + salt + nonce + associatedData)
         return key.copyOfRange(0, 8) + ByteArray(plaintext.size) { index ->
             (plaintext[index].toInt() xor key[index % key.size].toInt()).toByte()

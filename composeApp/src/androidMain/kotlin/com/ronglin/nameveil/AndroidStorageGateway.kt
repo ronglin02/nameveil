@@ -10,7 +10,6 @@ import com.ronglin.nameveil.core.StorageItem
 import com.ronglin.nameveil.core.StorageLocation
 import java.security.SecureRandom
 import javax.crypto.Cipher
-import javax.crypto.Mac
 import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.SecretKeySpec
 import kotlin.coroutines.Continuation
@@ -29,6 +28,10 @@ class AndroidStorageGateway(
 
     fun bindPicker(launcher: () -> Unit) {
         launchPicker = launcher
+    }
+
+    fun unbindPicker(launcher: () -> Unit) {
+        if (launchPicker === launcher) launchPicker = null
     }
 
     fun completePicker(treeUri: Uri?) {
@@ -78,8 +81,6 @@ class AndroidStorageGateway(
             DocumentsContract.Document.COLUMN_DOCUMENT_ID,
             DocumentsContract.Document.COLUMN_DISPLAY_NAME,
             DocumentsContract.Document.COLUMN_MIME_TYPE,
-            DocumentsContract.Document.COLUMN_SIZE,
-            DocumentsContract.Document.COLUMN_LAST_MODIFIED,
         )
 
         val result = mutableListOf<StorageItem>()
@@ -87,8 +88,6 @@ class AndroidStorageGateway(
             val idIndex = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DOCUMENT_ID)
             val nameIndex = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DISPLAY_NAME)
             val mimeIndex = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_MIME_TYPE)
-            val sizeIndex = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_SIZE)
-            val modifiedIndex = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_LAST_MODIFIED)
             while (cursor.moveToNext()) {
                 val childUri = DocumentsContract.buildDocumentUriUsingTree(
                     directoryUri,
@@ -98,8 +97,6 @@ class AndroidStorageGateway(
                     id = childUri.toString(),
                     name = cursor.getString(nameIndex).orEmpty(),
                     isDirectory = cursor.getString(mimeIndex) == DocumentsContract.Document.MIME_TYPE_DIR,
-                    size = if (cursor.isNull(sizeIndex)) 0 else cursor.getLong(sizeIndex),
-                    lastModified = if (cursor.isNull(modifiedIndex)) 0 else cursor.getLong(modifiedIndex),
                 )
             }
         } ?: error("Android 无法读取该目录，请重新授权")
@@ -186,30 +183,5 @@ class AndroidStorageGateway(
         } finally {
             keyBytes.fill(0)
         }
-    }
-
-}
-
-/** 与桌面端一致地使用 UTF-8 密码字节，确保含中文的密码也能跨设备恢复。 */
-internal fun derivePbkdf2Sha256(password: String, salt: ByteArray, iterations: Int): ByteArray {
-    require(iterations > 0) { "PBKDF2 迭代次数必须大于 0" }
-    val passwordBytes = password.encodeToByteArray()
-    return try {
-        val mac = Mac.getInstance("HmacSHA256")
-        mac.init(SecretKeySpec(passwordBytes, "HmacSHA256"))
-        var u = mac.doFinal(salt + byteArrayOf(0, 0, 0, 1))
-        val result = u.copyOf()
-        repeat(iterations - 1) {
-            val previous = u
-            u = mac.doFinal(previous)
-            result.indices.forEach { index ->
-                result[index] = (result[index].toInt() xor u[index].toInt()).toByte()
-            }
-            previous.fill(0)
-        }
-        u.fill(0)
-        result
-    } finally {
-        passwordBytes.fill(0)
     }
 }

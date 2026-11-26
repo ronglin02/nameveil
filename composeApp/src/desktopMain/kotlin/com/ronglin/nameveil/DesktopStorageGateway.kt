@@ -10,7 +10,6 @@ import java.nio.file.Paths
 import java.nio.file.StandardOpenOption
 import java.security.SecureRandom
 import javax.crypto.Cipher
-import javax.crypto.Mac
 import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.SecretKeySpec
 import javax.swing.JFileChooser
@@ -68,8 +67,6 @@ class DesktopStorageGateway : PlatformGateway {
                     id = child.toAbsolutePath().normalize().toString(),
                     name = child.fileName.toString(),
                     isDirectory = isDirectory,
-                    size = if (isDirectory) 0 else runCatching { Files.size(child) }.getOrDefault(0),
-                    lastModified = runCatching { Files.getLastModifiedTime(child).toMillis() }.getOrDefault(0),
                 )
             }.toList()
         }
@@ -144,30 +141,5 @@ class DesktopStorageGateway : PlatformGateway {
         } finally {
             keyBytes.fill(0)
         }
-    }
-
-}
-
-/** 明确以 UTF-8 密码字节执行 PBKDF2，避免不同 JVM/Android Provider 对 char[] 编码不一致。 */
-internal fun derivePbkdf2Sha256(password: String, salt: ByteArray, iterations: Int): ByteArray {
-    require(iterations > 0) { "PBKDF2 迭代次数必须大于 0" }
-    val passwordBytes = password.encodeToByteArray()
-    return try {
-        val mac = Mac.getInstance("HmacSHA256")
-        mac.init(SecretKeySpec(passwordBytes, "HmacSHA256"))
-        var u = mac.doFinal(salt + byteArrayOf(0, 0, 0, 1))
-        val result = u.copyOf()
-        repeat(iterations - 1) {
-            val previous = u
-            u = mac.doFinal(previous)
-            result.indices.forEach { index ->
-                result[index] = (result[index].toInt() xor u[index].toInt()).toByte()
-            }
-            previous.fill(0)
-        }
-        u.fill(0)
-        result
-    } finally {
-        passwordBytes.fill(0)
     }
 }

@@ -26,6 +26,7 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ManageSearch
@@ -59,6 +60,9 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
+import androidx.compose.material3.SegmentedButton
+import androidx.compose.material3.SegmentedButtonDefaults
+import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.darkColorScheme
@@ -67,6 +71,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -77,13 +82,15 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.ronglin.nameveil.core.OperationMode
+import com.ronglin.nameveil.core.MAX_WORKERS
 import com.ronglin.nameveil.core.OperationReport
-import com.ronglin.nameveil.core.PlatformGateway
+import kotlinx.coroutines.launch
 import com.ronglin.nameveil.core.RenamePlan
 
 private val LightColors = lightColorScheme(
@@ -111,10 +118,9 @@ private val DarkColors = darkColorScheme(
 )
 
 @Composable
-fun NameVeilApp(platform: PlatformGateway) {
+fun NameVeilApp(controller: AppController, executionScope: kotlinx.coroutines.CoroutineScope? = null) {
     val dark = isSystemInDarkTheme()
     val colors = if (dark) DarkColors else LightColors
-    val controller = remember(platform) { AppController(platform) }
     val scope = rememberCoroutineScope()
     var showConfirmation by remember { mutableStateOf(false) }
 
@@ -204,7 +210,9 @@ fun NameVeilApp(platform: PlatformGateway) {
                 confirmButton = {
                     Button(onClick = {
                         showConfirmation = false
-                        controller.execute(scope)
+                        if (controller.prepareExecution()) {
+                            (executionScope ?: scope).launch { controller.executePrepared() }
+                        }
                     }) { Text("确认执行") }
                 },
                 dismissButton = {
@@ -261,7 +269,7 @@ private fun AppHeader() {
             color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.75f),
         ) {
             Text(
-                "v1.0",
+                "v$APP_VERSION",
                 Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
                 color = MaterialTheme.colorScheme.onPrimaryContainer,
                 style = MaterialTheme.typography.labelMedium,
@@ -284,7 +292,7 @@ private fun ControlPanel(
         PanelCard(compact) {
             SectionTitle("处理方式", "选择隐匿名称或根据 NAMEVEIL 配置恢复")
             Spacer(Modifier.height(sectionGap))
-            ModeSelector(controller.mode, controller::updateMode, compact)
+            ModeSelector(controller.mode, controller::updateMode, compact, enabled = !controller.isBusy)
         }
 
         PanelCard(compact) {
@@ -327,32 +335,49 @@ private fun ControlPanel(
         }
 
         PanelCard(compact) {
-            SectionTitle("操作选项", "预览后仍需再次确认才会修改文件")
-            Spacer(Modifier.height(if (compact) 5.dp else 8.dp))
-            OptionRow(
-                title = "包含子目录",
-                description = "递归处理所选目录下的所有层级",
-                checked = controller.includeSubdirectories,
-                onCheckedChange = controller::updateIncludeSubdirectories,
-                compact = compact,
-            )
-            if (controller.mode == OperationMode.Transform) {
-                HorizontalDivider(
-                    Modifier.padding(vertical = if (compact) 2.dp else 4.dp),
-                    color = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f),
-                )
-                OptionRow(
-                    title = "保留扩展名（不推荐）",
-                    description = "关闭后才能规避仅根据 .jpg、.pdf 等后缀工作的扫描器",
-                    checked = controller.preserveExtension,
-                    onCheckedChange = controller::updatePreserveExtension,
-                    compact = compact,
-                )
+            var expanded by rememberSaveable { mutableStateOf(false) }
+            val summary = buildString {
+                append(if (controller.includeSubdirectories) "包含子目录" else "仅当前目录")
+                if (controller.mode == OperationMode.Transform) {
+                    append(if (controller.preserveExtension) " · 保留扩展名" else " · 移除扩展名")
+                }
             }
-            Spacer(Modifier.height(if (compact) 6.dp else 9.dp))
+            Row(
+                Modifier.fillMaxWidth().clickable { expanded = !expanded }.padding(vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(Modifier.weight(1f)) { SectionTitle("设置", summary) }
+                Icon(if (expanded) Icons.Rounded.ExpandMore else Icons.Rounded.ChevronRight,
+                    if (expanded) "收起设置" else "展开设置")
+            }
+            if (expanded) {
+                OptionRow(
+                    title = "包含子目录",
+                    description = "递归处理所选目录下的所有层级",
+                    checked = controller.includeSubdirectories,
+                    onCheckedChange = controller::updateIncludeSubdirectories,
+                    compact = compact,
+                    enabled = !controller.isBusy,
+                )
+                if (controller.mode == OperationMode.Transform) {
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f))
+                    OptionRow(
+                        title = "保留扩展名（不推荐）",
+                        description = "关闭后才能规避仅根据 .jpg、.pdf 等后缀工作的扫描器",
+                        checked = controller.preserveExtension,
+                        onCheckedChange = controller::updatePreserveExtension,
+                        compact = compact,
+                        enabled = !controller.isBusy,
+                    )
+                }
+                ThreadSettings(controller)
+            }
+        }
+        PanelCard(compact) {
             OutlinedTextField(
                 value = controller.password,
                 onValueChange = controller::updatePassword,
+                enabled = !controller.isBusy,
                 modifier = Modifier.fillMaxWidth(),
                 singleLine = true,
                 label = { Text("配置密码") },
@@ -421,10 +446,10 @@ private fun ControlPanel(
 
         controller.progress?.let { progress ->
             PanelCard(compact) {
-                Text("正在处理 ${progress.completedDirectories}/${progress.totalDirectories}", fontWeight = FontWeight.SemiBold)
+                Text("已改名 ${progress.completedFiles} / ${progress.totalFiles} 个文件", fontWeight = FontWeight.SemiBold)
                 Spacer(Modifier.height(if (compact) 6.dp else 8.dp))
                 LinearProgressIndicator(
-                    progress = { if (progress.totalDirectories == 0) 0f else progress.completedDirectories.toFloat() / progress.totalDirectories },
+                    progress = { progress.completedFiles.toFloat() / progress.totalFiles.coerceAtLeast(1) },
                     modifier = Modifier.fillMaxWidth(),
                 )
                 if (progress.currentDirectory.isNotEmpty()) {
@@ -752,6 +777,7 @@ private fun ModeSelector(
     selected: OperationMode,
     onSelected: (OperationMode) -> Unit,
     compact: Boolean,
+    enabled: Boolean,
 ) {
     Row(
         Modifier
@@ -760,8 +786,8 @@ private fun ModeSelector(
             .background(MaterialTheme.colorScheme.surfaceVariant)
             .padding(if (compact) 3.dp else 4.dp),
     ) {
-        ModeButton("隐匿文件名", OperationMode.Transform, selected, onSelected, Modifier.weight(1f), compact)
-        ModeButton("恢复文件名", OperationMode.Restore, selected, onSelected, Modifier.weight(1f), compact)
+        ModeButton("隐匿文件名", OperationMode.Transform, selected, onSelected, Modifier.weight(1f), compact, enabled)
+        ModeButton("恢复文件名", OperationMode.Restore, selected, onSelected, Modifier.weight(1f), compact, enabled)
     }
 }
 
@@ -773,10 +799,11 @@ private fun ModeButton(
     onSelected: (OperationMode) -> Unit,
     modifier: Modifier,
     compact: Boolean,
+    enabled: Boolean,
 ) {
     val active = mode == selected
     Surface(
-        modifier = modifier.clip(RoundedCornerShape(10.dp)).clickable { onSelected(mode) },
+        modifier = modifier.clip(RoundedCornerShape(10.dp)).clickable(enabled = enabled) { onSelected(mode) },
         color = if (active) MaterialTheme.colorScheme.surface else Color.Transparent,
         shadowElevation = if (active) 2.dp else 0.dp,
         shape = RoundedCornerShape(10.dp),
@@ -793,12 +820,45 @@ private fun ModeButton(
 }
 
 @Composable
+private fun ThreadSettings(controller: AppController) {
+    val settings = controller.settings
+    val enabled = !controller.isBusy
+    Spacer(Modifier.height(8.dp))
+    Text("多线程", style = MaterialTheme.typography.labelLarge)
+    SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
+        ThreadMode.entries.forEachIndexed { index, mode ->
+            SegmentedButton(
+                selected = settings.threadMode == mode,
+                enabled = enabled,
+                onClick = { controller.updateSettings(settings.copy(threadMode = mode)) },
+                shape = SegmentedButtonDefaults.itemShape(index, ThreadMode.entries.size),
+            ) { Text(mode.label) }
+        }
+    }
+    if (settings.threadMode == ThreadMode.On) {
+        OutlinedTextField(
+            value = controller.workerInput,
+            onValueChange = controller::updateWorkerInput,
+            label = { Text("并发数（1–$MAX_WORKERS）") },
+            isError = !controller.validWorkers,
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+            singleLine = true,
+            enabled = enabled,
+            modifier = Modifier.fillMaxWidth(),
+        )
+    } else if (settings.threadMode == ThreadMode.Auto) {
+        Text("此设备最多同时处理 ${controller.autoWorkers} 项", style = MaterialTheme.typography.bodySmall)
+    }
+}
+
+@Composable
 private fun OptionRow(
     title: String,
     description: String,
     checked: Boolean,
     onCheckedChange: (Boolean) -> Unit,
     compact: Boolean,
+    enabled: Boolean,
 ) {
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
         Column(Modifier.weight(1f)) {
@@ -812,7 +872,7 @@ private fun OptionRow(
             )
         }
         Spacer(Modifier.width(8.dp))
-        Switch(checked, onCheckedChange)
+        Switch(checked, onCheckedChange, enabled = enabled)
     }
 }
 
@@ -849,6 +909,8 @@ private fun MessageCard(
 private fun ReportCard(report: OperationReport) {
     val message = buildString {
         append("已完成 ${report.completedDirectories} 个目录，共改名 ${report.renamedFiles} 个文件。")
+        append("\n执行用时 ${report.elapsedMs / 1000}.${(report.elapsedMs % 1000).toString().padStart(3, '0')} 秒")
+        if (report.stagedFiles > 0) append("，其中 ${report.stagedFiles} 个文件使用了临时名")
         if (report.failures.isNotEmpty()) append("\n失败：${report.failures.joinToString("\n")}")
         if (report.warnings.isNotEmpty()) append("\n提示：${report.warnings.joinToString("\n")}")
     }

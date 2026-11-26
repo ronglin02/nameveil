@@ -9,6 +9,18 @@ plugins {
     alias(libs.plugins.kotlinSerialization)
 }
 
+val appVersion = providers.gradleProperty("nameveilVersion").get()
+val generateVersion by tasks.registering {
+    val output = layout.buildDirectory.dir("generated/nameveilVersion")
+    inputs.property("version", appVersion)
+    outputs.dir(output)
+    doLast {
+        val source = output.get().file("com/ronglin/nameveil/AppVersion.kt").asFile
+        source.parentFile.mkdirs()
+        source.writeText("package com.ronglin.nameveil\n\nconst val APP_VERSION = \"$appVersion\"\n")
+    }
+}
+
 kotlin {
     androidTarget {
         compilerOptions.jvmTarget.set(JvmTarget.JVM_17)
@@ -19,6 +31,7 @@ kotlin {
     }
 
     sourceSets {
+        commonMain.get().kotlin.srcDir(generateVersion)
         commonMain.dependencies {
             implementation(compose.runtime)
             implementation(compose.foundation)
@@ -33,8 +46,10 @@ kotlin {
         androidMain.dependencies {
             implementation(libs.androidx.activity.compose)
         }
+        androidMain.get().kotlin.srcDir("src/jvmShared/kotlin")
 
         val desktopMain by getting {
+            kotlin.srcDir("src/jvmShared/kotlin")
             dependencies {
                 implementation(compose.desktop.currentOs)
                 implementation(libs.kotlinx.coroutines.swing)
@@ -78,8 +93,9 @@ android {
         applicationId = "com.ronglin.nameveil"
         minSdk = 26
         targetSdk = 35
-        versionCode = 10002
-        versionName = "1.0.2"
+        val (major, minor, patch) = appVersion.split('.').map(String::toInt)
+        versionCode = major * 10000 + minor * 100 + patch
+        versionName = appVersion
     }
 
     compileOptions {
@@ -107,7 +123,7 @@ compose.desktop {
         nativeDistributions {
             targetFormats(TargetFormat.Msi, TargetFormat.Deb)
             packageName = "NameVeil"
-            packageVersion = "1.0.2"
+            packageVersion = appVersion
             // Keep native-package metadata ASCII-only: Windows jpackage reads its
             // generated argument file with the active system code page.
             description = "Offline cross-platform filename privacy tool"

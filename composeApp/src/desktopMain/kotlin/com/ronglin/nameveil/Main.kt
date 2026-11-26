@@ -1,5 +1,7 @@
 package com.ronglin.nameveil
 
+import androidx.compose.runtime.remember
+
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Window
@@ -24,6 +26,10 @@ private fun launchDesktopGui() = application {
         icon = painterResource("nameveil-icon-generated.png"),
         state = state,
     ) {
-        NameVeilApp(DesktopStorageGateway())
+        val controller = remember {
+            val settings = DesktopSettings()
+            AppController(DesktopStorageGateway(), initialSettings = settings.load(), saveSettings = settings::save)
+        }
+        NameVeilApp(controller)
     }
 }

@@ -1,5 +1,17 @@
 package com.ronglin.nameveil.core
 
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Deferred
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.withContext
+import kotlin.time.TimeSource
+
 enum class OperationMode { Transform, Restore }
 
 data class RenameMapping(
@@ -14,7 +26,7 @@ data class DirectoryPlan(
     val relativePath: String,
     val mappings: List<RenameMapping>,
     val configId: String? = null,
-    val configBytes: ByteArray? = null,
+    internal val buildPendingConfig: (() -> ByteArray)? = null,
 )
 
 data class RenamePlan(
@@ -29,6 +41,8 @@ data class OperationProgress(
     val completedDirectories: Int,
     val totalDirectories: Int,
     val currentDirectory: String,
+    val completedFiles: Int,
+    val totalFiles: Int,
 )
 
 data class OperationReport(
@@ -36,6 +50,8 @@ data class OperationReport(
     val completedDirectories: Int,
     val failures: List<String>,
     val warnings: List<String>,
+    val elapsedMs: Long = 0,
+    val stagedFiles: Int = 0,
 ) {
     val isSuccess: Boolean get() = failures.isEmpty()
 }
@@ -45,36 +61,46 @@ class PlanException(message: String) : IllegalStateException(message)
 class RenameEngine(
     private val storage: StorageGateway,
     private val crypto: CryptoSupport,
+    private val workers: Int = automaticWorkers(),
 ) {
+    init {
+        require(workers in 1..MAX_WORKERS)
+    }
+
     suspend fun createPlan(
         location: StorageLocation,
         mode: OperationMode,
         password: String,
         includeSubdirectories: Boolean,
         preserveExtension: Boolean,
-    ): RenamePlan {
+    ): RenamePlan = coroutineScope {
         if (password.isEmpty()) throw PlanException("请输入配置密码")
 
-        val directories = mutableListOf<DirectoryRef>()
-        collectDirectories(
-            directoryId = location.rootId,
-            relativePath = location.displayName.ifBlank { "." },
-            recursive = includeSubdirectories,
-            output = directories,
-        )
-
         val problems = mutableListOf<String>()
-        val plans = directories.mapNotNull { directory ->
-            try {
-                when (mode) {
-                    OperationMode.Transform -> planTransform(directory, password, preserveExtension)
-                    OperationMode.Restore -> planRestore(directory, password)
-                }
-            } catch (error: Exception) {
-                problems += "${directory.relativePath}：${error.message ?: "无法读取目录"}"
-                null
-            }
+        val plans = mutableListOf<DirectoryPlan>()
+        val pending = ArrayDeque<Deferred<Result<DirectoryPlan?>>>()
+        suspend fun collectNext() {
+            pending.removeFirst().await().fold(
+                onSuccess = { if (it != null) plans += it },
+                onFailure = { problems += it.message.orEmpty() },
+            )
         }
+        walkDirectories(location, includeSubdirectories) { directory, children ->
+            pending.addLast(async(Dispatchers.Default) {
+                try {
+                    Result.success(when (mode) {
+                        OperationMode.Transform -> planTransform(directory, children, password, preserveExtension)
+                        OperationMode.Restore -> planRestore(directory, children, password)
+                    })
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (error: Exception) {
+                    Result.failure(PlanException("${directory.relativePath}：${error.message ?: "无法读取目录"}"))
+                }
+            })
+            if (pending.size >= workers) collectNext()
+        }
+        while (pending.isNotEmpty()) collectNext()
 
         if (problems.isNotEmpty()) throw PlanException(problems.joinToString("\n"))
         if (plans.isEmpty()) {
@@ -86,30 +112,24 @@ class RenameEngine(
             throw PlanException(message)
         }
 
-        return RenamePlan(mode, location, plans)
+        RenamePlan(mode, location, plans)
     }
 
     suspend fun recoverPassword(
         location: StorageLocation,
         includeSubdirectories: Boolean,
     ): String {
-        val directories = mutableListOf<DirectoryRef>()
-        collectDirectories(
-            directoryId = location.rootId,
-            relativePath = location.displayName.ifBlank { "." },
-            recursive = includeSubdirectories,
-            output = directories,
-        )
-
         val passwords = mutableSetOf<String>()
         val problems = mutableListOf<String>()
-        directories.forEach { directory ->
+        walkDirectories(location, includeSubdirectories) { directory, children ->
             try {
-                storage.listChildren(directory.id)
+                children
                     .filter { !it.isDirectory && it.name in configFileNames }
                     .forEach { config ->
                         passwords += NameVeilConfigCodec.recoverPassword(storage.readBytes(config.id))
                     }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
             } catch (error: Exception) {
                 problems += "${directory.relativePath}：${error.message ?: "无法读取配置"}"
             }
@@ -125,52 +145,63 @@ class RenameEngine(
         plan: RenamePlan,
         onProgress: (OperationProgress) -> Unit = {},
     ): OperationReport {
+        val start = TimeSource.Monotonic.markNow()
         var renamedFiles = 0
+        var stagedFiles = 0
         var completedDirectories = 0
         val failures = mutableListOf<String>()
         val warnings = mutableListOf<String>()
 
         plan.directories.forEachIndexed { index, directory ->
-            onProgress(OperationProgress(index, plan.directories.size, directory.relativePath))
+            currentCoroutineContext().ensureActive()
+            fun publish(filesInDirectory: Int) {
+                onProgress(OperationProgress(index, plan.directories.size, directory.relativePath,
+                    renamedFiles + filesInDirectory, plan.mappings.size))
+            }
+            publish(0)
             try {
                 when (plan.mode) {
-                    OperationMode.Transform -> executeTransform(directory)
-                    OperationMode.Restore -> executeRestore(directory, warnings)
+                    OperationMode.Transform -> executeTransform(directory, ::publish)
+                    OperationMode.Restore -> stagedFiles += executeRestore(directory, warnings, ::publish)
                 }
                 renamedFiles += directory.mappings.size
                 completedDirectories++
+            } catch (cancelled: CancellationException) {
+                throw cancelled
             } catch (error: Exception) {
                 failures += "${directory.relativePath}：${error.message ?: "操作失败"}"
             }
         }
 
-        onProgress(OperationProgress(plan.directories.size, plan.directories.size, ""))
-        return OperationReport(renamedFiles, completedDirectories, failures, warnings)
+        onProgress(OperationProgress(plan.directories.size, plan.directories.size, "", renamedFiles, plan.mappings.size))
+        return OperationReport(renamedFiles, completedDirectories, failures, warnings, start.elapsedNow().inWholeMilliseconds, stagedFiles)
     }
 
-    private suspend fun collectDirectories(
-        directoryId: String,
-        relativePath: String,
+    private suspend fun walkDirectories(
+        location: StorageLocation,
         recursive: Boolean,
-        output: MutableList<DirectoryRef>,
+        visit: suspend (DirectoryRef, List<StorageItem>) -> Unit,
     ) {
-        output += DirectoryRef(directoryId, relativePath)
-        if (!recursive) return
-        storage.listChildren(directoryId)
-            .asSequence()
-            .filter { it.isDirectory }
-            .sortedBy { it.name.lowercase() }
-            .forEach { child ->
-                collectDirectories(child.id, "$relativePath/${child.name}", true, output)
+        val remaining = ArrayDeque<DirectoryRef>()
+        remaining.addLast(DirectoryRef(location.rootId, location.displayName.ifBlank { "." }))
+        while (remaining.isNotEmpty()) {
+            val directory = remaining.removeLast()
+            val children = storage.listChildren(directory.id)
+            if (recursive) {
+                children.filter { it.isDirectory }.sortedBy { it.name.lowercase() }.asReversed().forEach { child ->
+                    remaining.addLast(DirectoryRef(child.id, "${directory.relativePath}/${child.name}"))
+                }
             }
+            visit(directory, children)
+        }
     }
 
-    private suspend fun planTransform(
+    private fun planTransform(
         directory: DirectoryRef,
+        children: List<StorageItem>,
         password: String,
         preserveExtension: Boolean,
     ): DirectoryPlan? {
-        val children = storage.listChildren(directory.id)
         val markers = children.filter { !it.isDirectory && it.name in configFileNames }
         require(markers.isEmpty()) {
             "已存在 NameVeil 配置或未完成操作配置；请先选择“恢复文件名”"
@@ -190,21 +221,21 @@ class RenameEngine(
             RenameMapping(file.id, directory.relativePath, file.name, target)
         }
 
-        val config = NameVeilConfigPayload(
-            createdAtEpochMs = crypto.currentTimeMillis(),
-            entries = mappings.map { StoredNameMapping(it.toName, it.fromName) },
-        )
-
         return DirectoryPlan(
             directoryId = directory.id,
             relativePath = directory.relativePath,
             mappings = mappings,
-            configBytes = NameVeilConfigCodec.encrypt(config, password, crypto),
+            buildPendingConfig = {
+                val config = NameVeilConfigPayload(
+                    createdAtEpochMs = crypto.currentTimeMillis(),
+                    entries = mappings.map { StoredNameMapping(it.toName, it.fromName) },
+                )
+                NameVeilConfigCodec.encrypt(config, password, crypto)
+            },
         )
     }
 
-    private suspend fun planRestore(directory: DirectoryRef, password: String): DirectoryPlan? {
-        val children = storage.listChildren(directory.id)
+    private suspend fun planRestore(directory: DirectoryRef, children: List<StorageItem>, password: String): DirectoryPlan? {
         val configs = children.filter { !it.isDirectory && it.name in configFileNames }
         if (configs.isEmpty()) return null
         require(configs.size == 1) { "发现多个 NameVeil 配置，无法判断应使用哪一份" }
@@ -231,8 +262,7 @@ class RenameEngine(
                 }
                 null
             } else {
-                // A target occupied by another configured source is safe: every source
-                // enters a unique temporary name before final names are restored.
+                // Overlapping source and target names are staged before the final rename.
                 require(existingTarget == null || existingTarget.name in currentNames) {
                     "原始文件名已被占用：${entry.originalName}"
                 }
@@ -248,99 +278,103 @@ class RenameEngine(
         )
     }
 
-    private suspend fun executeTransform(plan: DirectoryPlan) {
-        val configBytes = requireNotNull(plan.configBytes)
-        var pendingId: String? = storage.createFile(
-            plan.directoryId,
-            PENDING_CONFIG_FILE_NAME,
-            "application/octet-stream",
-            configBytes,
-        )
-        val completed = mutableListOf<CompletedRename>()
+    private suspend fun executeTransform(plan: DirectoryPlan, onFiles: (Int) -> Unit) {
+        val configBytes = requireNotNull(plan.buildPendingConfig).invoke()
+        currentCoroutineContext().ensureActive()
+        val pendingId = withContext(NonCancellable) {
+            storage.createFile(plan.directoryId, PENDING_CONFIG_FILE_NAME, "application/octet-stream", configBytes)
+        }
+        val states = plan.mappings.map(::RenameState)
 
         try {
-            for (mapping in plan.mappings) {
-                val newId = storage.rename(mapping.itemId, mapping.toName)
-                completed += CompletedRename(newId, mapping.fromName)
-            }
-            pendingId = storage.rename(requireNotNull(pendingId), CONFIG_FILE_NAME)
+            renameInBatches(states, onFiles) { it.mapping.toName }
+            currentCoroutineContext().ensureActive()
+            withContext(NonCancellable) { storage.rename(pendingId, CONFIG_FILE_NAME) }
         } catch (error: Exception) {
-            val rollbackErrors = rollback(completed)
-            try {
-                pendingId?.let { storage.delete(it) }
-            } catch (deleteError: Exception) {
-                rollbackErrors += "无法删除 pending 配置：${deleteError.message}"
+            val rollbackErrors = withContext(NonCancellable) {
+                val errors = rollback(states, staged = false)
+                if (errors.isEmpty()) {
+                    try {
+                        storage.delete(pendingId)
+                    } catch (deleteError: Exception) {
+                        errors += "无法删除 pending 配置：${deleteError.message}"
+                    }
+                }
+                errors
             }
+            if (error is CancellationException) throw error
             val suffix = if (rollbackErrors.isEmpty()) "" else "；回滚异常：${rollbackErrors.joinToString("；")}" 
             throw IllegalStateException("改名未完成，已尝试回滚：${error.message}$suffix", error)
         }
     }
 
-    private suspend fun executeRestore(plan: DirectoryPlan, warnings: MutableList<String>) {
-        val states = plan.mappings.map { mapping ->
-            RestoreState(
-                currentId = mapping.itemId,
-                currentName = mapping.fromName,
-                originalCurrentName = mapping.fromName,
-                targetName = mapping.toName,
-            )
-        }
+    private suspend fun executeRestore(plan: DirectoryPlan, warnings: MutableList<String>, onFiles: (Int) -> Unit): Int {
+        val states = plan.mappings.map(::RenameState)
+        val targets = plan.mappings.mapTo(mutableSetOf()) { it.toName.lowercase() }
+        val blocking = states.filter { it.mapping.fromName.lowercase() in targets }
         try {
-            // 所有源文件先进入唯一临时名，因此即使包含名称交换也能安全恢复。
-            states.forEach { state ->
-                val temporaryName = ".NAMEVEIL.restore.${randomName()}"
-                state.currentId = storage.rename(state.currentId, temporaryName)
-                state.currentName = temporaryName
-                state.hasMoved = true
-            }
-            states.forEach { state ->
-                state.currentId = storage.rename(state.currentId, state.targetName)
-                state.currentName = state.targetName
-            }
+            renameInBatches(blocking, {}) { ".NAMEVEIL.restore.${randomName()}" }
+            renameInBatches(states, onFiles) { it.mapping.toName }
         } catch (error: Exception) {
-            val rollbackErrors = rollbackRestore(states.filter { it.hasMoved })
+            val rollbackErrors = withContext(NonCancellable) { rollback(states, staged = blocking.isNotEmpty()) }
+            if (error is CancellationException) throw error
             val suffix = if (rollbackErrors.isEmpty()) "" else "；回滚异常：${rollbackErrors.joinToString("；")}" 
             throw IllegalStateException("恢复未完成，已尝试回滚：${error.message}$suffix", error)
         }
 
         try {
-            storage.delete(requireNotNull(plan.configId))
+            withContext(NonCancellable) { storage.delete(requireNotNull(plan.configId)) }
         } catch (error: Exception) {
             warnings += "${plan.relativePath}：文件名已恢复，但 NameVeil 配置删除失败（${error.message}）"
         }
+        return blocking.size
     }
 
-    private suspend fun rollback(completed: List<CompletedRename>): MutableList<String> {
-        val errors = mutableListOf<String>()
-        completed.asReversed().forEach { rename ->
-            try {
-                storage.rename(rename.currentId, rename.originalName)
-            } catch (error: Exception) {
-                errors += "${rename.originalName}：${error.message}"
+    // Await every started storage operation (including its returned SAF ID) before rollback.
+    private suspend fun renameInBatches(
+        states: List<RenameState>,
+        onFiles: (Int) -> Unit,
+        target: (RenameState) -> String,
+    ) {
+        for (start in states.indices step workers) {
+            currentCoroutineContext().ensureActive()
+            val end = minOf(start + workers, states.size)
+            val failures = withContext(NonCancellable) {
+                (start until end).map { index ->
+                    async {
+                        val state = states[index]
+                        try {
+                            state.currentId = storage.rename(state.currentId, target(state))
+                            state.moved = true
+                            null
+                        } catch (error: Exception) {
+                            error
+                        }
+                    }
+                }.awaitAll()
             }
+            failures.firstOrNull { it != null }?.let { throw it }
+            onFiles(end)
         }
-        return errors
     }
 
-    private suspend fun rollbackRestore(states: List<RestoreState>): MutableList<String> {
+    private suspend fun rollback(states: List<RenameState>, staged: Boolean): MutableList<String> {
         val errors = mutableListOf<String>()
-
-        // 再次汇聚到临时名称，先清空所有可能互相占用的最终名/原当前名。
-        states.forEach { state ->
-            try {
-                val temporaryName = ".NAMEVEIL.rollback.${randomName()}"
-                state.currentId = storage.rename(state.currentId, temporaryName)
-                state.currentName = temporaryName
-            } catch (error: Exception) {
-                errors += "无法准备回滚 ${state.originalCurrentName}：${error.message}"
+        val moved = states.asReversed().filter { it.moved }
+        if (staged) {
+            for (state in moved) {
+                try {
+                    state.currentId = storage.rename(state.currentId, ".NAMEVEIL.rollback.${randomName()}")
+                } catch (error: Exception) {
+                    errors += "无法准备回滚 ${state.mapping.fromName}：${error.message}"
+                }
             }
         }
-        states.forEach { state ->
+        for (state in moved) {
             try {
-                state.currentId = storage.rename(state.currentId, state.originalCurrentName)
-                state.currentName = state.originalCurrentName
+                storage.rename(state.currentId, state.mapping.fromName)
             } catch (error: Exception) {
-                errors += "${state.originalCurrentName}：${error.message}"
+                errors += "${state.mapping.fromName}：${error.message}"
             }
         }
         return errors
@@ -361,14 +395,10 @@ class RenameEngine(
     }
 
     private data class DirectoryRef(val id: String, val relativePath: String)
-    private data class CompletedRename(val currentId: String, val originalName: String)
-    private data class RestoreState(
-        var currentId: String,
-        var currentName: String,
-        val originalCurrentName: String,
-        val targetName: String,
-        var hasMoved: Boolean = false,
-    )
+    private class RenameState(val mapping: RenameMapping) {
+        var currentId = mapping.itemId
+        var moved = false
+    }
 
     private companion object {
         val configFileNames = setOf(CONFIG_FILE_NAME, PENDING_CONFIG_FILE_NAME)

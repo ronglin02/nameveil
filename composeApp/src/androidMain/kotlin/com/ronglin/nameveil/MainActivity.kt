@@ -4,19 +4,26 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import com.ronglin.nameveil.core.OperationMode
 
 class MainActivity : ComponentActivity() {
+    private val app get() = application as NameVeilApplication
+    private val picker = registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+        app.storage.completePicker(uri)
+    }
+    private val openPicker: () -> Unit = { picker.launch(null) }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-
-        val storage = AndroidStorageGateway(this)
-        val picker = registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
-            storage.completePicker(uri)
+        if (savedInstanceState == null && !app.controller.isBusy) {
+            app.controller.updateMode(OperationMode.Restore)
         }
-        storage.bindPicker { picker.launch(null) }
+        app.storage.bindPicker(openPicker)
+        setContent { NameVeilApp(app.controller, app.executionScope) }
+    }
 
-        setContent {
-            NameVeilApp(storage)
-        }
+    override fun onDestroy() {
+        app.storage.unbindPicker(openPicker)
+        super.onDestroy()
     }
 }

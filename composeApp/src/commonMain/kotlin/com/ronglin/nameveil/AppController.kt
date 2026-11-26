@@ -4,6 +4,9 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import com.ronglin.nameveil.core.OperationMode
+import com.ronglin.nameveil.core.DEFAULT_WORKERS
+import com.ronglin.nameveil.core.MAX_WORKERS
+import com.ronglin.nameveil.core.automaticWorkers
 import com.ronglin.nameveil.core.OperationProgress
 import com.ronglin.nameveil.core.OperationReport
 import com.ronglin.nameveil.core.PlatformGateway
@@ -11,23 +14,77 @@ import com.ronglin.nameveil.core.RenameEngine
 import com.ronglin.nameveil.core.RenamePlan
 import com.ronglin.nameveil.core.StorageLocation
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-class AppController(private val platform: PlatformGateway) {
-    private val engine = RenameEngine(platform, platform)
+enum class ThreadMode(val label: String) { Auto("自动"), On("是"), Off("否") }
+
+@kotlinx.serialization.Serializable
+data class RunSettings(
+    val threadMode: ThreadMode = ThreadMode.Auto,
+    val manualWorkers: Int = DEFAULT_WORKERS,
+    val includeSubdirectories: Boolean = true,
+    val preserveExtension: Boolean = false,
+)
+
+class AppController(
+    private val platform: PlatformGateway,
+    initialSettings: RunSettings = RunSettings(),
+    private val saveSettings: (RunSettings) -> Unit = {},
+) {
+    var settings by mutableStateOf(initialSettings)
+        private set
+    var workerInput by mutableStateOf(initialSettings.manualWorkers.toString())
+        private set
+    val autoWorkers = automaticWorkers()
+    val validWorkers get() = workerInput.toIntOrNull() in 1..MAX_WORKERS
+
+    fun updateSettings(value: RunSettings) {
+        if (isBusy) return
+        if (settings.includeSubdirectories != value.includeSubdirectories || settings.preserveExtension != value.preserveExtension) {
+            invalidatePreview()
+        }
+        settings = value
+        try {
+            saveSettings(value)
+        } catch (error: Exception) {
+            errorMessage = "设置已在本次运行生效，保存失败：${error.message.orEmpty()}"
+        }
+    }
+
+    fun updateWorkerInput(text: String) {
+        if (isBusy) return
+        workerInput = text
+        text.toIntOrNull()?.takeIf { it in 1..MAX_WORKERS }?.let {
+            updateSettings(settings.copy(manualWorkers = it))
+        }
+    }
+
+    private fun engineForSettings(): RenameEngine? {
+        val workers = when (settings.threadMode) {
+            ThreadMode.Auto -> autoWorkers
+            ThreadMode.Off -> 1
+            ThreadMode.On -> workerInput.toIntOrNull()?.takeIf { it in 1..MAX_WORKERS }
+        }
+        if (workers == null) {
+            errorMessage = "请在设置中输入 1 至 $MAX_WORKERS 的并发数。"
+            return null
+        }
+        return RenameEngine(platform, platform, workers)
+    }
 
     var location: StorageLocation? by mutableStateOf(null)
         private set
-    var mode: OperationMode by mutableStateOf(OperationMode.Transform)
+    var mode: OperationMode by mutableStateOf(OperationMode.Restore)
         private set
     var password: String by mutableStateOf("")
         private set
-    var includeSubdirectories: Boolean by mutableStateOf(true)
-        private set
-    var preserveExtension: Boolean by mutableStateOf(false)
-        private set
+    val includeSubdirectories get() = settings.includeSubdirectories
+    val preserveExtension get() = settings.preserveExtension
     var showPassword: Boolean by mutableStateOf(false)
         private set
     var plan: RenamePlan? by mutableStateOf(null)
@@ -67,6 +124,7 @@ class AppController(private val platform: PlatformGateway) {
         }
         if (isBusy) return@launch
 
+        val engine = engineForSettings() ?: return@launch
         isBusy = true
         errorMessage = null
         report = null
@@ -88,17 +146,43 @@ class AppController(private val platform: PlatformGateway) {
         }
     }
 
-    fun execute(scope: CoroutineScope) = scope.launch {
-        val currentPlan = plan ?: return@launch
-        if (isBusy) return@launch
+    fun prepareExecution(): Boolean {
+        val currentPlan = plan ?: return false
+        if (isBusy) return false
+        if (settings.threadMode == ThreadMode.On && !validWorkers) {
+            errorMessage = "请在设置中输入 1 至 $MAX_WORKERS 的并发数。"
+            return false
+        }
 
         isBusy = true
         errorMessage = null
         report = null
-        progress = OperationProgress(0, currentPlan.directories.size, "")
+        progress = OperationProgress(0, currentPlan.directories.size, "", 0, currentPlan.mappings.size)
+        return true
+    }
+
+    suspend fun executePrepared() {
+        val currentPlan = checkNotNull(plan)
+        val engine = checkNotNull(engineForSettings())
         try {
-            report = engine.execute(currentPlan) { progress = it }
+            report = coroutineScope {
+                val updates = Channel<OperationProgress>(Channel.CONFLATED)
+                launch {
+                    for (update in updates) progress = update
+                }
+                try {
+                    withContext(Dispatchers.Default) {
+                        engine.execute(currentPlan) { updates.trySend(it) }
+                    }
+                } finally {
+                    updates.close()
+                }
+            }
             plan = null
+        } catch (cancelled: CancellationException) {
+            plan = null
+            errorMessage = "执行已中断，请重新生成预览以检查目录状态。"
+            throw cancelled
         } catch (error: Exception) {
             errorMessage = error.userMessage("执行失败")
         } finally {
@@ -120,7 +204,7 @@ class AppController(private val platform: PlatformGateway) {
         infoMessage = null
         try {
             password = withContext(Dispatchers.Default) {
-                engine.recoverPassword(selected, includeSubdirectories)
+                RenameEngine(platform, platform).recoverPassword(selected, includeSubdirectories)
             }
             showPassword = true
             plan = null
@@ -146,13 +230,11 @@ class AppController(private val platform: PlatformGateway) {
     }
 
     fun updateIncludeSubdirectories(value: Boolean) {
-        includeSubdirectories = value
-        invalidatePreview()
+        updateSettings(settings.copy(includeSubdirectories = value))
     }
 
     fun updatePreserveExtension(value: Boolean) {
-        preserveExtension = value
-        invalidatePreview()
+        updateSettings(settings.copy(preserveExtension = value))
     }
 
     fun togglePasswordVisibility() {

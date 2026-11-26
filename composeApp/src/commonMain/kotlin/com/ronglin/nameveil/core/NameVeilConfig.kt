@@ -6,7 +6,8 @@ import kotlinx.serialization.json.Json
 
 const val CONFIG_FILE_NAME = "NAMEVEIL"
 const val PENDING_CONFIG_FILE_NAME = "NAMEVEIL.pending"
-const val CONFIG_KDF_ITERATIONS = 310_000
+// Lowest write cost accepted by existing v1 readers. Reads use the stored count.
+const val CONFIG_KDF_ITERATIONS = 100_000
 private const val CONFIG_ASSOCIATED_DATA = "nameveil-config-v1"
 
 @Serializable
@@ -113,13 +114,21 @@ object NameVeilConfigCodec {
     }
 }
 
-internal fun ByteArray.toHex(): String = joinToString("") { byte ->
-    byte.toUByte().toString(16).padStart(2, '0')
+private const val HEX_DIGITS = "0123456789abcdef"
+
+internal fun ByteArray.toHex(): String = buildString(size * 2) {
+    for (byte in this@toHex) {
+        val value = byte.toInt() and 0xff
+        append(HEX_DIGITS[value ushr 4])
+        append(HEX_DIGITS[value and 0x0f])
+    }
 }
 
 internal fun String.hexToBytes(): ByteArray {
     require(length % 2 == 0) { "十六进制内容长度无效" }
     return ByteArray(length / 2) { index ->
-        substring(index * 2, index * 2 + 2).toInt(16).toByte()
+        val high = this[index * 2].digitToInt(16)
+        val low = this[index * 2 + 1].digitToInt(16)
+        ((high shl 4) or low).toByte()
     }
 }

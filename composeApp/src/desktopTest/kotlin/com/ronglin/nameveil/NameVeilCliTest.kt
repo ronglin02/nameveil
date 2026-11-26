@@ -20,7 +20,7 @@ class NameVeilCliTest {
             val gateway = DesktopStorageGateway()
 
             val protectCode = NameVeilCli.run(
-                arrayOf("protect", directory.toString(), "--password", "test-password", "--yes"),
+                arrayOf("protect", directory.toString(), "--password", "test-password", "--yes", "--threads", "off", "--no-progress"),
                 gateway,
             )
             assertEquals(0, protectCode)
@@ -29,7 +29,7 @@ class NameVeilCliTest {
             assertTrue(fileNames(directory).filter { it != CONFIG_FILE_NAME }.none { '.' in it })
 
             val restoreCode = NameVeilCli.run(
-                arrayOf("restore", directory.toString(), "--password", "test-password", "--yes"),
+                arrayOf("restore", directory.toString(), "--password", "test-password", "--yes", "--threads", "6"),
                 gateway,
             )
             assertEquals(0, restoreCode)

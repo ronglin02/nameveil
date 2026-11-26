@@ -2,10 +2,12 @@ package com.ronglin.nameveil
 
 import com.ronglin.nameveil.core.OperationMode
 import com.ronglin.nameveil.core.RenamePlan
+import com.ronglin.nameveil.core.MAX_WORKERS
+import com.ronglin.nameveil.core.automaticWorkers
 import java.nio.file.Path
 
 object NameVeilCli {
-    const val VERSION = "1.0.0"
+    const val VERSION = APP_VERSION
 
     suspend fun run(args: Array<String>, gateway: DesktopStorageGateway): Int {
         if (args.isEmpty() || args.first() in setOf("help", "--help", "-h")) {
@@ -21,7 +23,7 @@ object NameVeilCli {
             val verb = args.first().lowercase()
             val options = parseOptions(args.drop(1))
             val location = gateway.locationFor(Path.of(options.directory))
-            val engine = com.ronglin.nameveil.core.RenameEngine(gateway, gateway)
+            val engine = com.ronglin.nameveil.core.RenameEngine(gateway, gateway, options.workers)
 
             if (verb in setOf("password", "show-password", "recover-password")) {
                 println(engine.recoverPassword(location, options.recursive))
@@ -52,8 +54,10 @@ object NameVeilCli {
                 return 0
             }
 
+            var lastDirectory = -1
             val report = engine.execute(plan) { progress ->
-                if (progress.currentDirectory.isNotEmpty()) {
+                if (options.progress && progress.currentDirectory.isNotEmpty() && progress.completedDirectories != lastDirectory) {
+                    lastDirectory = progress.completedDirectories
                     println("[${progress.completedDirectories + 1}/${progress.totalDirectories}] ${progress.currentDirectory}")
                 }
             }
@@ -71,6 +75,8 @@ object NameVeilCli {
         var directory: String? = null
         var recursive = true
         var keepExtension = false
+        var workers = automaticWorkers()
+        var progress = true
         var dryRun = false
         var assumeYes = false
         var password: String? = null
@@ -82,6 +88,16 @@ object NameVeilCli {
                 "--no-recursive" -> recursive = false
                 "--recursive" -> recursive = true
                 "--keep-extension" -> keepExtension = true
+                "--no-progress" -> progress = false
+                "--threads" -> {
+                    val count = arguments.getOrNull(++index)
+                    workers = when (count) {
+                        "auto" -> automaticWorkers()
+                        "off" -> 1
+                        else -> count?.toIntOrNull()?.takeIf { it in 1..MAX_WORKERS }
+                            ?: throw CliException("--threads 需要 auto、off 或 1–$MAX_WORKERS")
+                    }
+                }
                 "--dry-run" -> dryRun = true
                 "--yes", "-y" -> assumeYes = true
                 "--password" -> {
@@ -107,6 +123,8 @@ object NameVeilCli {
             directory = directory ?: throw CliException("缺少要处理的目录"),
             recursive = recursive,
             keepExtension = keepExtension,
+            workers = workers,
+            progress = progress,
             dryRun = dryRun,
             assumeYes = assumeYes,
             password = password,
@@ -171,6 +189,8 @@ object NameVeilCli {
               --yes, -y              非交互确认执行
               --no-recursive         只处理指定目录，不扫描子目录
               --keep-extension       保留扩展名（会降低对后缀扫描的规避效果）
+              --threads <auto|off|N> 自动、串行或指定并发数（1–$MAX_WORKERS）
+              --no-progress          隐藏终端执行进度
               --password-env <名称>  从环境变量读取密码，默认 NAMEVEIL_PASSWORD
               --password <密码>      直接传入密码（不推荐，可能进入 shell 历史/进程列表）
               --help, -h             显示帮助
@@ -193,6 +213,8 @@ object NameVeilCli {
         val directory: String,
         val recursive: Boolean,
         val keepExtension: Boolean,
+        val workers: Int,
+        val progress: Boolean,
         val dryRun: Boolean,
         val assumeYes: Boolean,
         val password: String?,

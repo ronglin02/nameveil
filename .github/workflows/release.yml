@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag, for example v1.0.0"
+        description: "Release tag, for example v1.1.0"
         required: true
         type: string
 
@@ -31,7 +31,7 @@ jobs:
       - name: Verify release tag matches the application version
         shell: bash
         run: |
-          VERSION="$(sed -n 's/.*packageVersion = "\([^"]*\)".*/\1/p' composeApp/build.gradle.kts)"
+          VERSION="$(sed -n 's/^nameveilVersion=//p' gradle.properties)"
           test -n "$VERSION"
           test "$RELEASE_TAG" = "v$VERSION" || {
             echo "Release tag $RELEASE_TAG does not match application version v$VERSION"
